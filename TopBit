@@ -1,0 +1,443 @@
+```html
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Vaultagi Quant Terminal</title>
+    
+    <!-- Tailwind CSS (No build required) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM (Standalone) -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- Babel for compiling JSX in the browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Telegram Web App Integration -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <style>
+        /* Custom scrollbar für den coolen Look */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #0B0E14; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        body { background-color: #0B0E14; color: #cbd5e1; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // --- INLINE ICONS (100% Fail-safe, no external library needed) ---
+        const IconGlobe = ({size=32, className=""}) => (
+            <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+        );
+        const IconSmartphone = ({size=18, className=""}) => (
+            <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+        );
+        const IconPower = ({size=18, className=""}) => (
+            <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+        );
+
+        // --- MAIN APP ---
+        function App() {
+            const [price, setPrice] = useState(0);
+            const [balance, setBalance] = useState(100000.00); 
+            const [positions, setPositions] = useState([]);
+            const [algoActive, setAlgoActive] = useState(false);
+            const [chartData, setChartData] = useState([]); 
+            const [connectionStatus, setConnectionStatus] = useState('VERBINDEN...');
+            
+            const [atr, setAtr] = useState(0); 
+            const [rsi, setRsi] = useState(50);
+            const [bollinger, setBollinger] = useState({ upper: 0, lower: 0, mid: 0 });
+            
+            const [terminalLogs, setTerminalLogs] = useState([]);
+            const wsRef = useRef(null);
+
+            // TG Integration
+            useEffect(() => {
+                if (window.Telegram && window.Telegram.WebApp) {
+                    try {
+                        window.Telegram.WebApp.expand();
+                        window.Telegram.WebApp.setHeaderColor('#0B0E14');
+                    } catch(e) {}
+                }
+            }, []);
+
+            const addLog = useCallback((msg, type = 'info') => {
+                const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                setTerminalLogs(prev => [{ time, text: msg, type }, ...prev].slice(0, 15));
+            }, []);
+
+            // Live Data Engine (Binance 5m WS)
+            useEffect(() => {
+                addLog("System Boot... Vaultagi TG-Engine (5m) aktiv.", "system");
+
+                const fetchHistory = async () => {
+                    try {
+                        const res = await fetch('https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=50');
+                        const data = await res.json();
+                        const closes = data.map(d => parseFloat(d[4]));
+                        setChartData(closes);
+                        setPrice(closes[closes.length - 1]);
+                        calculateIndicators(closes);
+                    } catch (err) {
+                        addLog("API Error. Retry connected...", "bear");
+                    }
+                };
+
+                fetchHistory();
+
+                const connectWS = () => {
+                    const ws = new WebSocket('wss://stream.binance.com:9443/ws/paxgusdt@kline_5m');
+                    wsRef.current = ws;
+
+                    ws.onopen = () => {
+                        setConnectionStatus('LIVE');
+                        addLog("WebSocket Sync: XAU/USD 5m Pool.", "bull");
+                    };
+
+                    ws.onmessage = (event) => {
+                        const message = JSON.parse(event.data);
+                        const candle = message.k;
+                        const currentPrice = parseFloat(candle.c);
+                        const isFinal = candle.x; 
+
+                        setPrice(currentPrice);
+
+                        setChartData(prev => {
+                            if(prev.length === 0) return [currentPrice];
+                            const newData = [...prev];
+                            newData[newData.length - 1] = currentPrice;
+                            return newData;
+                        });
+
+                        if (isFinal) {
+                            addLog(`5m Block Mined @ ${currentPrice.toFixed(2)}`, "info");
+                            setChartData(prev => {
+                                const updated = [...prev.slice(1), currentPrice];
+                                calculateIndicators(updated, currentPrice);
+                                return updated;
+                            });
+                        }
+                    };
+
+                    ws.onclose = () => {
+                        setConnectionStatus('RECONNECT');
+                        setTimeout(connectWS, 3000);
+                    };
+                };
+
+                connectWS();
+                return () => { if (wsRef.current) wsRef.current.close(); };
+            }, [addLog]);
+
+            const calculateIndicators = (closes, currentPriceClose = null) => {
+                if (closes.length < 20) return;
+
+                let trSum = 0;
+                for(let i = Math.max(1, closes.length - 14); i < closes.length; i++) {
+                    trSum += Math.abs(closes[i] - closes[i-1]);
+                }
+                const currentAtr = Number((trSum / 14).toFixed(2));
+                setAtr(currentAtr);
+
+                const period = 20;
+                const slice = closes.slice(-period);
+                const sma = slice.reduce((a,b) => a+b, 0) / period;
+                
+                const squaredErrors = slice.map(val => Math.pow(val - sma, 2));
+                const variance = squaredErrors.reduce((a,b) => a+b, 0) / period;
+                const stdDev = Math.sqrt(variance);
+                
+                const bands = {
+                    mid: sma,
+                    upper: sma + (stdDev * 2),
+                    lower: sma - (stdDev * 2)
+                };
+                setBollinger(bands);
+
+                let gains = 0, losses = 0;
+                for(let i = closes.length - 14; i < closes.length; i++) {
+                    const diff = closes[i] - closes[i-1];
+                    if (diff >= 0) gains += diff;
+                    else losses -= diff;
+                }
+                const avgGain = gains / 14;
+                const avgLoss = losses / 14;
+                const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+                const currentRsi = 100 - (100 / (1 + rs));
+                setRsi(currentRsi);
+
+                evaluateTradingLogic(currentPriceClose || closes[closes.length-1], currentAtr, bands, currentRsi);
+            };
+
+            const evaluateTradingLogic = (currentPrice, currentAtr, bands, currentRsi) => {
+                if (!algoActive) return;
+
+                const equity = calcEquity();
+
+                if (positions.length < 1) { 
+                    let signal = null;
+                    const isOversold = currentRsi < 30;
+                    const isOverbought = currentRsi > 70;
+                    const sweptLower = currentPrice < bands.lower;
+                    const sweptUpper = currentPrice > bands.upper;
+
+                    if (isOversold && sweptLower) {
+                        signal = 'BUY';
+                        addLog(`⚡ SMC SWEEP: Liquidity gefischt. RSI: ${currentRsi.toFixed(0)}`, 'system');
+                    } else if (isOverbought && sweptUpper) {
+                        signal = 'SELL';
+                        addLog(`⚡ SMC SWEEP: Liquidity gefischt. RSI: ${currentRsi.toFixed(0)}`, 'system');
+                    }
+
+                    if (signal) {
+                        const RISK_PCT = 0.015; 
+                        const riskAmount = equity * RISK_PCT;
+                        const stopDistance = Math.max(currentAtr * 1.2, 1.5); 
+                        
+                        let size = riskAmount / (stopDistance * 10);
+                        size = Math.max(0.1, Math.min(Number(size.toFixed(2)), 10.0)); 
+
+                        const sl = signal === 'BUY' ? currentPrice - stopDistance : currentPrice + stopDistance;
+                        const tp = signal === 'BUY' ? currentPrice + (stopDistance * 2) : currentPrice - (stopDistance * 2);
+
+                        const newPos = { 
+                            id: Date.now().toString(), 
+                            type: signal, 
+                            entry: currentPrice, 
+                            size: size,
+                            sl: Number(sl.toFixed(2)),
+                            tp: Number(tp.toFixed(2)),
+                            trailingActive: false
+                        };
+
+                        setPositions([...positions, newPos]);
+                        addLog(`🎯 EXECUTION: ${signal} @ ${currentPrice.toFixed(2)}`, 'system');
+                    }
+                }
+            };
+
+            useEffect(() => {
+                if (!algoActive || positions.length === 0 || price === 0) return;
+
+                positions.forEach(pos => {
+                    const isLong = pos.type === 'BUY';
+                    const points = isLong ? price - pos.entry : pos.entry - price;
+                    const pnl = points * (pos.size * 10);
+
+                    if ((isLong && price <= pos.sl) || (!isLong && price >= pos.sl)) {
+                        closeTrade(pos.id, 'Stop Loss', pnl);
+                    } else if ((isLong && price >= pos.tp) || (!isLong && price <= pos.tp)) {
+                        closeTrade(pos.id, 'Take Profit', pnl);
+                    } else if (points > atr && !pos.trailingActive) {
+                        updatePosition(pos.id, { trailingActive: true, sl: pos.entry });
+                        addLog(`🛡️ Break-Even gesichert (#${pos.id.slice(-3)})`, 'info');
+                    }
+                });
+            }, [price, algoActive, positions, atr, addLog]);
+
+            const closeTrade = (id, reason, pnl) => {
+                setPositions(prev => prev.filter(p => p.id !== id));
+                setBalance(b => b + pnl);
+                addLog(`💸 CLOSE (${reason}): ${pnl > 0 ? '+' : ''}$${pnl.toFixed(2)}`, pnl > 0 ? 'bull' : 'bear');
+            };
+
+            const updatePosition = (id, updates) => {
+                setPositions(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p));
+            };
+
+            const calcEquity = () => {
+                let floating = 0;
+                positions.forEach(pos => {
+                    const diff = pos.type === 'BUY' ? price - pos.entry : pos.entry - price;
+                    floating += diff * (pos.size * 10);
+                });
+                return balance + floating;
+            };
+
+            const equity = calcEquity();
+
+            if (price === 0) {
+                return (
+                    <div className="min-h-screen flex flex-col items-center justify-center text-slate-400 font-mono">
+                        <IconGlobe className="animate-spin text-amber-500 mb-4" size={32} />
+                        <p className="text-sm">VAULTAGI SYNC...</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen flex flex-col">
+                    <header className="sticky top-0 z-50 bg-[#0B0E14]/90 backdrop-blur-md border-b border-slate-800 p-4">
+                        <div className="flex justify-between items-center">
+                            <div className="flex items-center gap-2">
+                                <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center border border-amber-500/20">
+                                    <IconSmartphone className="text-amber-400" size={18} />
+                                </div>
+                                <div>
+                                    <h1 className="text-lg font-bold text-white tracking-tight leading-none">VAULTAGI</h1>
+                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5 flex items-center gap-1">
+                                        5M Sniper 
+                                        <span className={`w-1.5 h-1.5 rounded-full ${connectionStatus === 'LIVE' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`}></span>
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="text-right">
+                                <p className="text-[10px] text-slate-500 font-semibold tracking-wider uppercase">Equity</p>
+                                <p className="text-lg font-mono text-white leading-none">${equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits:2})}</p>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-10">
+                        <div className="bg-[#111620] rounded-2xl border border-slate-800 p-4 relative overflow-hidden">
+                            <div className="flex justify-between items-end mb-4">
+                                <div>
+                                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1 block">XAU/USD (PAXG)</span>
+                                    <h2 className={`text-4xl font-mono tracking-tighter transition-colors duration-300 ${chartData[chartData.length-1] >= chartData[chartData.length-2] ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                        {price.toFixed(2)}
+                                    </h2>
+                                </div>
+                                <div className="text-right">
+                                    <span className="text-[10px] text-slate-500 font-bold uppercase block mb-1">RSI (14)</span>
+                                    <span className={`font-mono text-lg font-bold ${rsi > 70 ? 'text-rose-400' : rsi < 30 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                                        {rsi.toFixed(1)}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div className="h-32 w-full border border-slate-800/50 bg-[#0B0E14] rounded-xl relative overflow-hidden">
+                                <div className="absolute inset-0 flex items-end">
+                                    <svg width="100%" height="100%" preserveAspectRatio="none" className="overflow-visible">
+                                        {(() => {
+                                            const visibleData = chartData.slice(-30);
+                                            if (visibleData.length < 2 || !bollinger.upper) return null;
+                                            
+                                            const min = bollinger.lower - (atr * 0.5);
+                                            const max = bollinger.upper + (atr * 0.5);
+                                            const range = max - min || 1;
+                                            
+                                            const points = visibleData.map((val, i) => {
+                                                const x = (i / (visibleData.length - 1)) * 100;
+                                                const y = 100 - (((val - min) / range) * 100);
+                                                return `${x},${y}`;
+                                            }).join(' ');
+
+                                            const bbUpperY = 100 - (((bollinger.upper - min) / range) * 100);
+                                            const bbLowerY = 100 - (((bollinger.lower - min) / range) * 100);
+
+                                            return (
+                                                <React.Fragment>
+                                                    <rect x="0" y={bbUpperY + "%"} width="100%" height={(bbLowerY - bbUpperY) + "%"} fill="#334155" fillOpacity="0.1" />
+                                                    <line x1="0" y1={bbUpperY + "%"} x2="100%" y2={bbUpperY + "%"} stroke="#64748b" strokeWidth="1" strokeDasharray="4" strokeOpacity="0.3"/>
+                                                    <line x1="0" y1={bbLowerY + "%"} x2="100%" y2={bbLowerY + "%"} stroke="#64748b" strokeWidth="1" strokeDasharray="4" strokeOpacity="0.3"/>
+                                                    
+                                                    <polyline points={points} fill="none" stroke="#fbbf24" strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+                                                    <circle cx="100%" cy={`${100 - (((price - min) / range) * 100)}%`} r="4" fill="#10b981" />
+                                                </React.Fragment>
+                                            );
+                                        })()}
+                                    </svg>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="bg-[#111620] rounded-2xl border border-slate-800 p-4">
+                            <button 
+                                onClick={() => setAlgoActive(!algoActive)}
+                                className={`w-full py-4 rounded-xl font-bold uppercase tracking-widest text-sm flex justify-center items-center gap-2 transition-all duration-200 shadow-lg ${
+                                    algoActive 
+                                    ? 'bg-rose-500/10 text-rose-500 border border-rose-500/50' 
+                                    : 'bg-emerald-500 text-[#0B0E14] active:scale-95'
+                                }`}
+                            >
+                                <IconPower size={18} />
+                                {algoActive ? 'Sniper Pausieren' : 'Sniper Aktivieren'}
+                            </button>
+                            <div className="mt-3 flex justify-between text-[10px] text-slate-500 uppercase font-mono px-2">
+                                <span>Risk: 1.5%</span>
+                                <span>Filter: BB + RSI</span>
+                                <span>Pos: {positions.length}/1</span>
+                            </div>
+                        </div>
+
+                        {positions.length > 0 && (
+                            <div className="space-y-3">
+                                <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider px-2">Active Trade</h3>
+                                {positions.map(pos => {
+                                    const isLong = pos.type === 'BUY';
+                                    const pnl = (isLong ? price - pos.entry : pos.entry - price) * (pos.size * 10);
+                                    const isProfit = pnl >= 0;
+
+                                    return (
+                                        <div key={pos.id} className="bg-slate-900 p-4 rounded-2xl border border-slate-800 relative overflow-hidden">
+                                            {pos.trailingActive && <div className="absolute left-0 top-0 w-1 h-full bg-emerald-500"></div>}
+                                            <div className="flex justify-between items-start mb-4">
+                                                <div className="flex flex-col">
+                                                    <span className={`w-min px-2 py-0.5 rounded text-[10px] font-bold uppercase mb-1 ${isLong ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+                                                        {pos.type}
+                                                    </span>
+                                                    <span className="text-white font-mono text-sm">{pos.size.toFixed(2)} Lots</span>
+                                                </div>
+                                                <div className="text-right">
+                                                    <p className={`font-mono font-bold text-2xl leading-none ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                                        {isProfit ? '+' : ''}${pnl.toFixed(2)}
+                                                    </p>
+                                                    <p className="text-[10px] text-slate-500 font-mono mt-1">ENTRY: {pos.entry.toFixed(2)}</p>
+                                                </div>
+                                            </div>
+                                            
+                                            <div className="flex gap-2">
+                                                <button onClick={() => closeTrade(pos.id, 'Manual', pnl)} className="flex-1 py-2 bg-slate-800 text-slate-300 rounded-lg text-xs font-bold uppercase border border-slate-700 active:bg-slate-700">
+                                                    Close
+                                                </button>
+                                                <div className="flex-1 bg-[#0B0E14] rounded-lg border border-slate-800 flex flex-col justify-center items-center text-[10px] font-mono">
+                                                    <span className="text-slate-500">TP / SL</span>
+                                                    <span className="text-white">{pos.tp.toFixed(1)} / <span className="text-amber-400">{pos.sl.toFixed(1)}</span></span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        )}
+
+                        <div>
+                            <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider px-2 mb-2">Live Stream</h3>
+                            <div className="bg-[#111620] rounded-2xl border border-slate-800 p-3 h-40 overflow-y-auto font-mono text-[10px] space-y-2">
+                                {terminalLogs.map((log, i) => (
+                                    <div key={i} className={`flex gap-2 ${i === 0 ? 'opacity-100' : 'opacity-60'}`}>
+                                        <span className="text-slate-600 shrink-0">[{log.time}]</span>
+                                        <span className={`
+                                            ${log.type === 'system' ? 'text-amber-400' : ''}
+                                            ${log.type === 'bull' ? 'text-emerald-400' : ''}
+                                            ${log.type === 'bear' ? 'text-rose-400' : ''}
+                                            ${log.type === 'info' ? 'text-slate-300' : ''}
+                                        `}>
+                                            {log.text}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+
+```
